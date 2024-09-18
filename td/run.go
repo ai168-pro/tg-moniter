@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"tg-moniter/sensitive"
+	"sync"
 
 	"github.com/gotd/td/examples"
 	"github.com/gotd/td/session"
@@ -31,6 +31,12 @@ import (
 // 	}
 // }
 
+var userIDSet = map[int64]string{}
+
+var lock sync.Mutex
+
+var client *telegram.Client
+
 func Run(ctx context.Context, phone string) error {
 	log, _ := zap.NewDevelopment(zap.IncreaseLevel(zapcore.InfoLevel), zap.AddStacktrace(zapcore.FatalLevel))
 	defer func() { _ = log.Sync() }()
@@ -44,7 +50,7 @@ func Run(ctx context.Context, phone string) error {
 	flow := auth.NewFlow(examples.Terminal{PhoneNumber: phone}, auth.SendCodeOptions{})
 	wd, _ := os.Getwd()
 	// /Users/nguyenoanh/Desktop/session/
-	client := telegram.NewClient(appid, hash, telegram.Options{SessionStorage: &session.FileStorage{Path: wd + "/" + phone + ".json"}, Logger: log,
+	client = telegram.NewClient(appid, hash, telegram.Options{SessionStorage: &session.FileStorage{Path: wd + "/" + phone + ".json"}, Logger: log,
 		UpdateHandler: gaps,
 		Middlewares: []telegram.Middleware{
 			updhook.UpdateHook(gaps.Handle),
@@ -55,26 +61,70 @@ func Run(ctx context.Context, phone string) error {
 		// log.Info("Channel message", zap.Any("message", update.Message))
 
 		if msg, ok := update.Message.(*tg.Message); ok {
-			log.Info("收到消息：", zap.String("message", msg.Message))
-			unsensitive, word := sensitive.SensitiveWord.Validate(msg.Message)
-			if !unsensitive {
-				log.Info("命中关键词 ：", zap.Any("message", msg.Message), zap.String("关键词", word))
-
-				var user = &tg.User{}
-				var channel = &tg.Channel{}
-				// peerUser := msg.FromID.(*tg.PeerUser)
-				// user = e.Users[peerUser.UserID]
-				if peerUser, ok := msg.FromID.(*tg.PeerUser); ok {
-					user = e.Users[peerUser.UserID]
-				}
-				if peerChannel, ok := msg.PeerID.(*tg.PeerChannel); ok {
-					channel = e.Channels[peerChannel.ChannelID]
-				}
-
-				if !user.Bot {
-					writeSensitiveWordToFile(msg, user, channel, word)
-				}
+			if msg.Message == "" {
+				return nil
 			}
+			var user = &tg.User{}
+			if peerUser, ok := msg.FromID.(*tg.PeerUser); ok {
+				user = e.Users[peerUser.UserID]
+			} else {
+				// log.Warn("收到消息：", zap.Any("message", update.Message))
+			}
+			if user.Bot {
+				if len(msg.Message) > 27 {
+					fmt.Println("忽略掉机器人消息 : --", msg.Message[:27])
+				} else {
+					fmt.Println("忽略掉机器人消息", msg.Message)
+				}
+
+				return nil
+			}
+			// log.Info("收到消息：", zap.String("message", msg.Message))
+			// unsensitive, word := sensitive.SensitiveWord.Validate(msg.Message)
+			// if !unsensitive {
+			// log.Info("命中关键词 ：", zap.Any("message", msg.Message), zap.String("关键词", word))
+
+			var channel = &tg.Channel{}
+			if peerChannel, ok := msg.PeerID.(*tg.PeerChannel); ok {
+				channel = e.Channels[peerChannel.ChannelID]
+			} else {
+				// log.Warn("收到channel消息：", zap.Any("message", update.Message))
+			}
+
+			// fmt.Println(user.Username, user.AccessHash)
+			// fmt.Println(channel.Title)
+
+			if userName := userIDSet[user.ID]; userName == "" {
+				// userFull, err := client.API().UsersGetFullUser(context.TODO(), &tg.InputUserFromMessage{Peer: &tg.InputPeerChannel{ChannelID: channel.ID, AccessHash: channel.AccessHash}, MsgID: msg.ID, UserID: user.ID})
+				// if err == nil {
+				// 	if len(userFull.Users) > 0 {
+				// 		user1 := userFull.Users[0].(*tg.User)
+				// 		fmt.Println(user1.Username, "=userfull=", msg.Message)
+				// 	}
+				// } else {
+				users, err := client.API().UsersGetUsers(context.TODO(), []tg.InputUserClass{&tg.InputUser{UserID: user.ID, AccessHash: user.AccessHash}})
+				if err != nil {
+					fmt.Println(err, "err==", msg.Message, channel.ID, channel.AccessHash)
+					return nil
+				}
+				if len(users) > 0 {
+					user1 := users[0].(*tg.User)
+					fmt.Println(user1.Username, "=users=", msg.Message)
+				}
+				// }
+
+				lock.Lock()
+				userIDSet[user.ID] = user.Username
+				lock.Unlock()
+
+			}
+			writeSensitiveWordToFile(msg, user, channel, "")
+			// }
+		} else {
+			// log.Info("Channel message", zap.Any("message", update.Message))
+			// if msg, ok := update.Message.(*tg.MessageService); ok {
+			// 	unsensitive, word := sensitive.SensitiveWord.Validate(msg.Message)
+			// }
 		}
 
 		// message := update.Message.(*tg.Message)
@@ -107,6 +157,29 @@ func Run(ctx context.Context, phone string) error {
 	})
 }
 
+func Run2(ctx context.Context, phone string, gnum, msgnum, validate int) error {
+	log, _ := zap.NewDevelopment(zap.IncreaseLevel(zapcore.InfoLevel), zap.AddStacktrace(zapcore.FatalLevel))
+	defer func() { _ = log.Sync() }()
+
+	wd, _ := os.Getwd()
+	flow := auth.NewFlow(examples.Terminal{PhoneNumber: phone}, auth.SendCodeOptions{})
+	// /Users/nguyenoanh/Desktop/session/
+	client = telegram.NewClient(appid, hash, telegram.Options{SessionStorage: &session.FileStorage{Path: wd + "/" + phone + ".json"}, Logger: log})
+
+	return client.Run(ctx, func(ctx context.Context) error {
+		// Perform auth if no session is available.
+		if err := client.Auth().IfNecessary(ctx, flow); err != nil {
+			return errors.Wrap(err, "auth")
+		}
+
+		cm := NewChannelMessageService(gnum, msgnum, validate, ctx, client)
+		cm.ready()
+		cm.getMessage()
+
+		return cm.getMessage()
+	})
+}
+
 func writeSensitiveWordToFile(msg *tg.Message, user *tg.User, channel *tg.Channel, word string) (err error) {
 
 	wd, _ := os.Getwd()
@@ -116,7 +189,7 @@ func writeSensitiveWordToFile(msg *tg.Message, user *tg.User, channel *tg.Channe
 		return
 	}
 	defer result.Close()
-	result.WriteString(fmt.Sprintf("消息ID：%d ；群组名称： %s ; 发送用户者： %s ;手机号码： %s ; 关键词：%s ；全文: %s ； \n", msg.ID, channel.Title, user.FirstName+user.LastName, user.Phone, word, msg.Message))
+	result.WriteString(fmt.Sprintf("消息ID：%d ；群组名称： %s ; 用户名： %s ;昵称：%s ; 关键词：%s ；全文: %s ； \n", msg.ID, channel.Title, user.Username, user.FirstName+user.LastName, word, msg.Message))
 	result.WriteString("============================\n")
 	return
 }

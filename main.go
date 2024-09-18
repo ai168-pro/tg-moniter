@@ -23,7 +23,10 @@ func main() {
 	}
 
 	phone := cfg.Section("").Key("phone").String()
-	if err := td.Run(ctx, phone); err != nil {
+	groupNum := cfg.Section("").Key("groupnum").MustInt(10)
+	msgNum := cfg.Section("").Key("msgnum").MustInt(50)
+	validate := cfg.Section("").Key("allmsg").MustInt(0)
+	if err := td.Run2(ctx, phone, groupNum, msgNum, validate); err != nil {
 		panic(err)
 	}
 
